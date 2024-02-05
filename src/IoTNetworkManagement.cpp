@@ -9,7 +9,7 @@ _mqtt_user(""),
 _mqtt_password(""), 
 _mqttClient(_wifiClient), 
 _dht(nullptr),
-_timeClient(_ntpUDP, "0.br.pool.ntp.org",  -3 * 3600, 60000){
+_timeClient(_ntpUDP, "0.br.poll.ntp.org",  -3 * 3600, 60000){
 _sensors = std::vector<Sensor>();
 isIRSetupCalled = false;
 isTemperatureSetupCalled = false;
@@ -23,19 +23,23 @@ const std::map<IoTNetworkManagement::SensorType, String> IoTNetworkManagement::s
         {SensorType::TEMPERATURE, "temperature"},
         {SensorType::LIGHT, "light"}
 };
+
 void IoTNetworkManagement::begin() {
     // Setup code here: WiFi connection, MQTT connection, etc.
     Serial.println("Connecting to broker...");
-    _mqttClient.setServer(_mqtt_broker, _mqtt_port);
-    _mqttClient.setCallback(mqttCallback);
+    _mqttClient = MqttClient(_wifiClient);
+    _mqttClient.connect(_mqtt_broker, _mqtt_port);
+    _mqttClient.onMessage(mqttCallback);
     _mqttClient.subscribe("connected_devices");
     _mqttClient.subscribe("esp32/+/commands");
-
+    // _mqttClient.setKeepAlive(10);
+    // _mqttClient.setBufferSize(1024);
+    // _mqttClient.setSocketTimeout(30);
     if (mqttMutex == NULL) {
         Serial.println("Creating mutex");
         mqttMutex = xSemaphoreCreateMutex();
     }
-    _mqttClient.loop();
+    _mqttClient.poll();
     // Start the IR check task
     if (isIRSetupCalled) {
         Serial.println("IR setup called");
@@ -46,39 +50,39 @@ void IoTNetworkManagement::begin() {
             (void*) this,                 
             1,                    
             NULL,                 
-            0                  
+            1                 
         );
     }
 
     xTaskCreatePinnedToCore(
         deviceStatusTask,         
         "DeviceStatusTask",       
-        96000,                    
+        102000,                    
         this,                     
         0,                        
         &_deviceStatusTaskHandle, 
-        0                         
+        1               
     );
 
-    // Start the Wi-Fi signal strength task
-    xTaskCreatePinnedToCore(
-        wifiSignalStrengthTask,      
-        "WifiSignalStrengthTask",    
-        4096,                        
-        this,                        
-        0,                           
-        &_wifiSignalStrengthTaskHandle,
-        1
-    );
-    xTaskCreatePinnedToCore(
-        errorReportTask,              
-        "ErrorReportTask",            
-        2048,                         
-        this,                         
-        1,                            
-        &_errorReportTaskHandle,
-        1    
-    );
+    // // Start the Wi-Fi signal strength task
+    // xTaskCreatePinnedToCore(
+    //     wifiSignalStrengthTask,      
+    //     "WifiSignalStrengthTask",    
+    //     4096,                        
+    //     this,                        
+    //     0,                           
+    //     &_wifiSignalStrengthTaskHandle,
+    //     1
+    // );
+    // xTaskCreatePinnedToCore(
+    //     errorReportTask,              
+    //     "ErrorReportTask",            
+    //     2048,                         
+    //     this,                         
+    //     1,                            
+    //     &_errorReportTaskHandle,
+    //     1    
+    // );
     xTaskCreatePinnedToCore(
         this->mqttLoopTask, 
         "mqttLoopTask",     
@@ -94,22 +98,24 @@ void IoTNetworkManagement::begin() {
     _timeClient.begin();
     updateLastBootTime();
 
-    WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
-        this->handleError("Wi-Fi disconnected");
-    }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    // WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+    //     this->handleError("Wi-Fi disconnected");
+    // }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 }
 
-void IoTNetworkManagement::mqttCallback(char* topic, byte* payload, unsigned int length) {
+void IoTNetworkManagement::mqttCallback(int messageSize) {
         // Convert payload to a String for easy comparison
         IoTNetworkManagement& instance = IoTNetworkManagement::getInstance();
-        // Serial.println("Message received");
+        Serial.println("Message received");
+
         String message;
-        for (unsigned int i = 0; i < length; i++) {
-            message += (char)payload[i];
+
+        while (instance._mqttClient.available()) {
+            message += (char) instance._mqttClient.read();
         }
 
         // Check if the message is "GET" and if it's on the "connected_devices" topic
-        if (String(topic) == "connected_devices" && message == "GET") {
+        if (String(instance._mqttClient.messageTopic()) == "connected_devices" && message == "GET") {
             // Respond with "CONNECTED" message
             Serial.println("Connected devices");
             instance.publishData("connected_devices", "CONNECTED");
@@ -146,74 +152,47 @@ void IoTNetworkManagement::mqttCallback(char* topic, byte* payload, unsigned int
 
 void IoTNetworkManagement::reconnectMqtt() {
     // Attempt to reconnect to the MQTT broker
-    // if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
+    IoTNetworkManagement& instance = IoTNetworkManagement::getInstance();
+    if (instance.mqttMutex == NULL) {
+        Serial.println("Failed to create semaphore");
+        // Handle the error...  
+        instance.mqttMutex = xSemaphoreCreateMutex();
+    }
+    if (xSemaphoreTake(instance.mqttMutex, portMAX_DELAY) == pdTRUE) {
+        Serial.println("Trying Connection...");
+        instance._mqttClient.connect(_mqtt_broker, _mqtt_port);
+        instance._mqttClient.onMessage(mqttCallback);
 
-        while (!_mqttClient.connected()) {
-            Serial.println("Attempting MQTT connection...");
-            // Attempt to connect (modify as needed with your MQTT credentials)
-            if (_mqttClient.connect(_device_id, _mqtt_user, _mqtt_password)) {
-                Serial.println("MQTT connected");
-                // Resubscribe to topics if necessary
-                _mqttClient.subscribe("connected_devices");
-                String topic = String("esp32/") + _device_id + "/+";
-                _mqttClient.subscribe(topic.c_str());
-                _mqttClient.setCallback(IoTNetworkManagement::mqttCallback);
+        // _mqttClient.setKeepAlive(10);
+        // _mqttClient.setBufferSize(1024);
+        // _mqttClient.setSocketTimeout(30);
+        // while (!instance._mqttClient.connect(_device_id)){
+        //     Serial.print("MQTT connection failed, rc=");
+        // }
 
-            } else {
-                Serial.print("MQTT connection failed, rc=");
-                int state = _mqttClient.state();
-                Serial.print(state);
-                if (state != MQTT_CONNECTED) {
-                    // Convert state to a human-readable error message
-                    String errorMessage;
-                    switch (state) {
-                        case MQTT_CONNECTION_TIMEOUT:
-                            errorMessage = "MQTT_CONNECTION_TIMEOUT";
-                            break;
-                        case MQTT_CONNECTION_LOST:
-                            errorMessage = "MQTT_CONNECTION_LOST";
-                            break;
-                        case MQTT_CONNECT_FAILED:
-                            errorMessage = "MQTT_CONNECT_FAILED";
-                            break;
-                        case MQTT_DISCONNECTED:
-                            errorMessage = "MQTT_DISCONNECTED";
-                            break;
-                        case MQTT_CONNECT_BAD_PROTOCOL:
-                            errorMessage = "MQTT_CONNECT_BAD_PROTOCOL";
-                            break;
-                        case MQTT_CONNECT_BAD_CLIENT_ID:
-                            errorMessage = "MQTT_CONNECT_BAD_CLIENT_ID";
-                            break;
-                        case MQTT_CONNECT_UNAVAILABLE:
-                            errorMessage = "MQTT_CONNECT_UNAVAILABLE";
-                            break;
-                        case MQTT_CONNECT_BAD_CREDENTIALS:
-                            errorMessage = "MQTT_CONNECT_BAD_CREDENTIALS";
-                            break;
-                        case MQTT_CONNECT_UNAUTHORIZED:
-                            errorMessage = "MQTT_CONNECT_UNAUTHORIZED";
-                            break;
-                        default:
-                            errorMessage = "UNKNOWN_ERROR";
-                    }
-                    // Log the error message to NVS
-                    handleError(errorMessage);
-                }
-            }
-        }
+        Serial.println("MQTT connected");
+        // Resubscribe to topics if necessary
+        instance._mqttClient.subscribe("connected_devices");
+        String topic = String("esp32/") + _device_id + "/+";
+        instance._mqttClient.subscribe(topic.c_str());
+        instance._mqttClient.poll();
 
+        xSemaphoreGive(instance.mqttMutex);
+    } else {
+        // Handle the error case where the mutex couldn't be taken
+        Serial.println("Error: couldn't take MQTT mutex");  
+    }
+    
 }
 
 void IoTNetworkManagement::publishData(const char* type_of_data, const char* payload) {
     // Construct the MQTT topic
-    if (mqttMutex == NULL) {
-        Serial.println("Failed to create semaphore");
-        // Handle the error...  
-        mqttMutex = xSemaphoreCreateMutex();
-    }
-    if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
-
+    // if (mqttMutex == NULL) {
+    //     Serial.println("Failed to create semaphore");
+    //     // Handle the error...  
+    //     mqttMutex = xSemaphoreCreateMutex();
+    // }
+    // if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
         Serial.println("Publishing data...");
         Serial.println(type_of_data);
         Serial.println(payload);
@@ -224,26 +203,39 @@ void IoTNetworkManagement::publishData(const char* type_of_data, const char* pay
             topic = String("esp32/") + _device_id + "/" + type_of_data;
         }
         Serial.println(topic);
-        if(_mqttClient.connected()){
-            if(_mqttClient.publish(topic.c_str(), payload)){
-                Serial.println("Published");
-            } else {
-                handleError("Failed to publish " + String(type_of_data));
-                Serial.print("Failed to publish ");
-                Serial.print(type_of_data);
+        // if (_mqttClient ==  nullptr) {
+        //     Serial.println("MQTT client is null");
+        //     return;
+        // }
+
+
+        if(!_mqttClient.connected()){
+            if (!_mqttClient.connect(_mqtt_broker, _mqtt_port)) {
+                Serial.print("MQTT connection failed! Error code = ");
+                Serial.println();
+                handleError("MQTT not connected");
+                reconnectMqtt();
             }
-        } else {
-            Serial.println("MQTT not connected");
-            handleError("MQTT not connected");
-            reconnectMqtt();
         }
 
+        Serial.println("Connected to MQTT broker");
+
+        Serial.println("Trying to publish");
+        _mqttClient.beginMessage(topic);
+        _mqttClient.print(payload);
+        _mqttClient.endMessage();
+        Serial.println("Published");
+        // else {
+        //     handleError("Failed to publish " + String(type_of_data));
+        //     Serial.print("Failed to publish ");
+        //     Serial.print(type_of_data);
+        // }
         // Don't forget to give the mutex back when you're done
-        xSemaphoreGive(mqttMutex);
-    } else {
-        // Handle the error case where the mutex couldn't be taken
-        Serial.println("Error: couldn't take MQTT mutex");  
-    }
+        // xSemaphoreGive(mqttMutex);
+    // } else {
+    //     // Handle the error case where the mutex couldn't be taken
+    //     Serial.println("Error: couldn't take MQTT mutex");  
+    // }
 
 }
 
@@ -308,12 +300,74 @@ void IoTNetworkManagement::deviceStatusTask(void *parameter) {
     }
     auto instance = static_cast<IoTNetworkManagement*>(parameter);
     const long interval = 219330 / portTICK_PERIOD_MS;
-    esp_task_wdt_delete(NULL);
+    // esp_task_wdt_delete(NULL);
     for (;;) { // Task loop
+        if(instance->isLightSetupCalled) {
+            float lightLevel = analogRead(instance->_LIGHT_PIN);
+            String topic = "light";
+
+            // Check if any reads failed and exit early (to try again).
+            if (isnan(lightLevel) || lightLevel < 15) {
+                Serial.println(F("Failed to read from light sensor!"));
+                instance->handleError("Failed to read from light sensor!");
+                instance->publishData(topic.c_str(), "Offline");
+            } else {
+                Serial.println(lightLevel);
+                instance->publishData(topic.c_str(), "Online");
+            }
+        }
+
+        if(instance->isSoundSetupCalled) {
+            // Read the sound level
+            float soundLevel = analogRead(instance->_SOUND_PIN);
+            String topic = "sound";
+            // Check if any reads failed and exit early (to try again).
+            if (isnan(soundLevel) || soundLevel < 650) {
+                Serial.println(F("Failed to read from sound sensor!"));
+                instance->handleError("Failed to read from sound sensor!");
+                instance->publishData(topic.c_str(), "Offline");
+            } else {
+                Serial.println(soundLevel);
+                instance->publishData(topic.c_str(), "Online");
+            }
+        }
+
+        //Get Wifi Signal Strength
+        instance->getWifiSignalStrength();
+
+        if(instance->isTemperatureSetupCalled) {
+            if (instance->_dht == nullptr) {
+                // Handle the error
+                Serial.println("Error: _dht is null");
+                return;
+            }
+            // Reading temperature
+            float temperature = instance->_dht->readTemperature();
+            // Check if any reads failed and exit early (to try again).
+            if (isnan(temperature)) {
+                Serial.println(F("Failed to read temperature from DHT sensor!"));
+                instance->handleError("Failed to read temperature from DHT sensor!");
+                instance->publishData("temperature", "Offline");
+            } else {
+                Serial.println(temperature);
+                instance->publishData("temperature", "Online");
+            }
+        }
+
+        // Read the last error from NVS and publish it
+        instance->_preferences.begin("nvs", true);
+        String lastError = instance->_preferences.getString("last_error", "");
+        instance->_preferences.end();
+
+        if (lastError.length() > 0) {
+            instance->publishData("last_error", lastError.c_str());
+        }
+
         // Get device status and uptime
         String deviceStatus = WiFi.status() == WL_CONNECTED ? "Online" : "Offline";
-        unsigned long uptime = millis() / 60000; // Uptime in minutes
-    // Inside the task loop, right after publishing Device Uptime
+        unsigned long uptime = (int) (millis() / 60000);
+
+        // Inside the task loop, right after publishing Device Uptime
         unsigned long bootCount = instance->getBootCount();
         String lastBootTime = instance->getLastBootTime();
 
@@ -378,18 +432,18 @@ void IoTNetworkManagement::handleError(const String& error) {
 }
 
 
-void IoTNetworkManagement::wifiSignalStrengthTask(void *parameter) {
-    if (parameter == nullptr) {
-        Serial.println("Error: parameter is null");
-        return;
-    }
-    auto instance = static_cast<IoTNetworkManagement*>(parameter);
-    esp_task_wdt_delete(NULL);
-    for (;;) {
-        instance->getWifiSignalStrength();
-        vTaskDelay(165440 / portTICK_PERIOD_MS); // Delay for 3 minutes
-    }
-}
+// void IoTNetworkManagement::wifiSignalStrengthTask(void *parameter) {
+//     if (parameter == nullptr) {
+//         Serial.println("Error: parameter is null");
+//         return;
+//     }
+//     auto instance = static_cast<IoTNetworkManagement*>(parameter);
+//     esp_task_wdt_delete(NULL);
+//     for (;;) {
+//         instance->getWifiSignalStrength();
+//         vTaskDelay(165440 / portTICK_PERIOD_MS); // Delay for 3 minutes
+//     }
+// }
 
 void IoTNetworkManagement::getWifiSignalStrength() {
     long rssi = WiFi.RSSI();
@@ -414,43 +468,43 @@ void IoTNetworkManagement::setupSoundSensor(uint8_t pin, float threshold) {
     isSoundSetupCalled = true;
 
     // Create the task that will monitor the sound sensor
-    xTaskCreatePinnedToCore(
-        soundSensorTask,              // Function to implement the task
-        "SoundSensorTask",            // Name of the task
-        4096,                         // Stack size in words (adjust as necessary)
-        this,             // Task input parameter (pointer to the sound sensor)
-        3,                            // Priority of the task
-        NULL,   // Task handle,
-        0
-    );
+    // xTaskCreatePinnedToCore(
+    //     soundSensorTask,
+    //     "SoundSensorTask",
+    //     4096,
+    //     this,
+    //     3,
+    //     NULL,
+    //     0
+    // );
 }
 
 // Static task function that monitors the sound sensor
-void IoTNetworkManagement::soundSensorTask(void *parameter) {
-    if (parameter == nullptr) {
-        Serial.println("Error: parameter is null");
-        return;
-    }
-    IoTNetworkManagement* manager = static_cast<IoTNetworkManagement*>(parameter);
+// void IoTNetworkManagement::soundSensorTask(void *parameter) {
+//     if (parameter == nullptr) {
+//         Serial.println("Error: parameter is null");
+//         return;
+//     }
+//     IoTNetworkManagement* manager = static_cast<IoTNetworkManagement*>(parameter);
 
-    for (;;) {
-        // Read the sound level
-        float soundLevel = analogRead(manager->_SOUND_PIN);
-        String topic = "sound";
-        // Check if any reads failed and exit early (to try again).
-        if (isnan(soundLevel) || soundLevel < 650) {
-            Serial.println(F("Failed to read from sound sensor!"));
-            manager->handleError("Failed to read from sound sensor!");
-            manager->publishData(topic.c_str(), "Offline");
-        } else {
-            Serial.println(soundLevel);
-            manager->publishData(topic.c_str(), "Online");
-        }
+//     for (;;) {
+//         // Read the sound level
+//         float soundLevel = analogRead(manager->_SOUND_PIN);
+//         String topic = "sound";
+//         // Check if any reads failed and exit early (to try again).
+//         if (isnan(soundLevel) || soundLevel < 650) {
+//             Serial.println(F("Failed to read from sound sensor!"));
+//             manager->handleError("Failed to read from sound sensor!");
+//             manager->publishData(topic.c_str(), "Offline");
+//         } else {
+//             Serial.println(soundLevel);
+//             manager->publishData(topic.c_str(), "Online");
+//         }
 
-        // Delay between reads
-        vTaskDelay(131000 / portTICK_PERIOD_MS); 
-    }
-}
+//         // Delay between reads
+//         vTaskDelay(131000 / portTICK_PERIOD_MS); 
+//     }
+// }
 
 void IoTNetworkManagement::setupTemperatureSensor(uint8_t pin) {
     // Initialize the DHT sensor
@@ -460,43 +514,44 @@ void IoTNetworkManagement::setupTemperatureSensor(uint8_t pin) {
     
     _dht->begin();
     isTemperatureSetupCalled = true;
+
     // Create and start the temperature sensor task
-    xTaskCreatePinnedToCore(
-        temperatureSensorTask,    // Task function
-        "TemperatureSensorTask",  // Name of the task
-        8240,                     // Stack size (adjust as necessary)
-        this,                     // Task input parameter (passing the IoTNetworkManagement instance)
-        1,                        // Priority of the task
-        NULL,
-        0
-    );
+    // xTaskCreatePinnedToCore(
+    //     temperatureSensorTask,
+    //     "TemperatureSensorTask",  
+    //     8240,                     
+    //     this,                    
+    //     1,                        
+    //     NULL,
+    //     0
+    // );
 }
 
 // In the task where you handle the sensor readings
-void IoTNetworkManagement::temperatureSensorTask(void* parameter) {
-    if (parameter == nullptr) {
-        Serial.println("Error: parameter is null");
-        return;
-    }
-    IoTNetworkManagement* manager = static_cast<IoTNetworkManagement*>(parameter);
+// void IoTNetworkManagement::temperatureSensorTask(void* parameter) {
+//     if (parameter == nullptr) {
+//         Serial.println("Error: parameter is null");
+//         return;
+//     }
+//     IoTNetworkManagement* manager = static_cast<IoTNetworkManagement*>(parameter);
 
-    for (;;) {
-        // Reading temperature or humidity takes about 250 milliseconds!
-        float temperature = manager->_dht->readTemperature();
-        // Check if any reads failed and exit early (to try again).
-        if (isnan(temperature)) {
-            Serial.println(F("Failed to read temperature from DHT sensor!"));
-            manager->handleError("Failed to read temperature from DHT sensor!");
-            manager->publishData("temperature", "Offline");
-        } else {
-            Serial.println(temperature);
-            manager->publishData("temperature", "Online");
-        }
+//     for (;;) {
+//         // Reading temperature or humidity takes about 250 milliseconds!
+//         float temperature = manager->_dht->readTemperature();
+//         // Check if any reads failed and exit early (to try again).
+//         if (isnan(temperature)) {
+//             Serial.println(F("Failed to read temperature from DHT sensor!"));
+//             manager->handleError("Failed to read temperature from DHT sensor!");
+//             manager->publishData("temperature", "Offline");
+//         } else {
+//             Serial.println(temperature);
+//             manager->publishData("temperature", "Online");
+//         }
 
-        // Wait a bit before reading again
-        vTaskDelay(91000 / portTICK_PERIOD_MS); // Delay between reads (adjust as necessary)
-    }
-}
+//         // Wait a bit before reading again
+//         vTaskDelay(91000 / portTICK_PERIOD_MS); // Delay between reads (adjust as necessary)
+//     }
+// }
 
 void IoTNetworkManagement::setupLightSensor(uint8_t pin) {
     // Configure the GPIO pin for the light sensor
@@ -515,74 +570,88 @@ void IoTNetworkManagement::setupLightSensor(uint8_t pin) {
     _sensors.push_back(lightSensor);
 
     // Create the task that will monitor the light sensor
-    xTaskCreatePinnedToCore(
-        lightSensorTask,              // Function to implement the task
-        "LightSensorTask",            // Name of the task
-        3480,                         // Stack size in words (adjust as necessary)
-        this,             // Task input parameter (pointer to the light sensor)
-        2,                            // Priority of the task
-        NULL,
-        0
-    );
+    // xTaskCreatePinnedToCore(
+    //     lightSensorTask,              // Function to implement the task
+    //     "LightSensorTask",            // Name of the task
+    //     3480,                         // Stack size in words (adjust as necessary)
+    //     this,                         // Task input parameter (pointer to the light sensor)
+    //     2,                            // Priority of the task
+    //     NULL,
+    //     0
+    // );
 }
 
 // Static task function that monitors the light sensor
-void IoTNetworkManagement::lightSensorTask(void *parameter) {
-    if (parameter == nullptr) {
-        Serial.println("Error: light parameter is null");
-        return;
-    }
-    IoTNetworkManagement* manager = static_cast<IoTNetworkManagement*>(parameter);
-    for (;;) {
-        // Read the light level
-        float lightLevel = analogRead(manager->_LIGHT_PIN);
-        String topic = "light";
-        // Check if any reads failed and exit early (to try again).
-        if (isnan(lightLevel) || lightLevel < 15) {
-            Serial.println(F("Failed to read from light sensor!"));
-            manager->handleError("Failed to read from light sensor!");
-            manager->publishData(topic.c_str(), "Offline");
-        } else {
-            Serial.println(lightLevel);
-            manager->publishData(topic.c_str(), "Online");
-        }
+// void IoTNetworkManagement::lightSensorTask(void *parameter) {
+//     if (parameter == nullptr) {
+//         Serial.println("Error: light parameter is null");
+//         return;
+//     }
+//     IoTNetworkManagement* manager = static_cast<IoTNetworkManagement*>(parameter);
+//     for (;;) {
+//         // Read the light level
+//         float lightLevel = analogRead(manager->_LIGHT_PIN);
+//         String topic = "light";
+//         // Check if any reads failed and exit early (to try again).
+//         if (isnan(lightLevel) || lightLevel < 15) {
+//             Serial.println(F("Failed to read from light sensor!"));
+//             manager->handleError("Failed to read from light sensor!");
+//             manager->publishData(topic.c_str(), "Offline");
+//         } else {
+//             Serial.println(lightLevel);
+//             manager->publishData(topic.c_str(), "Online");
+//         }
 
-        // Delay between reads
-        vTaskDelay(147100 / portTICK_PERIOD_MS); // Adjust as necessary
-    }
-}
+//         // Delay between reads
+//         vTaskDelay(147100 / portTICK_PERIOD_MS);
+//     }
+// }
 
 void IoTNetworkManagement::mqttLoopTask(void *parameter) {
     if (parameter == nullptr) {
         Serial.println("Error: parameter is null");
         return;
     }
+
+
     IoTNetworkManagement *instance = static_cast<IoTNetworkManagement *>(parameter);
-    for (;;) {
-        instance->_mqttClient.loop();
-        vTaskDelay(pdMS_TO_TICKS(30)); // Delay curto para evitar uso excessivo da CPU
+    if (instance->mqttMutex == NULL) {
+        Serial.println("Failed to create semaphore");
+        // Handle the error...  
+        instance->mqttMutex = xSemaphoreCreateMutex();
     }
-}
-
-void IoTNetworkManagement::errorReportTask(void *parameter) {
-    if (parameter == nullptr) {
-        Serial.println("Error: parameter is null");
-        return;
-    }
-    IoTNetworkManagement* instance = static_cast<IoTNetworkManagement*>(parameter);
-
     for (;;) {
-        instance->_preferences.begin("nvs", true);
-        String lastError = instance->_preferences.getString("last_error", "");
-        instance->_preferences.end();
-
-        if (lastError.length() > 0) {
-            instance->publishData("last_error", lastError.c_str());
+        if (xSemaphoreTake(instance->mqttMutex, portMAX_DELAY) == pdTRUE) {
+            instance->_mqttClient.poll();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            // Don't forget to give the mutex back when you're done
+            xSemaphoreGive(instance->mqttMutex);
+        } else {
+            // Handle the error case where the mutex couldn't be taken
+            Serial.println("Error: couldn't take MQTT mutex");  
         }
-
-        vTaskDelay(pdMS_TO_TICKS(179051)); // Espera por 3 minutos
     }
 }
+
+// void IoTNetworkManagement::errorReportTask(void *parameter) {
+//     if (parameter == nullptr) {
+//         Serial.println("Error: parameter is null");
+//         return;
+//     }
+//     IoTNetworkManagement* instance = static_cast<IoTNetworkManagement*>(parameter);
+
+//     for (;;) {
+//         instance->_preferences.begin("nvs", true);
+//         String lastError = instance->_preferences.getString("last_error", "");
+//         instance->_preferences.end();
+
+//         if (lastError.length() > 0) {
+//             instance->publishData("last_error", lastError.c_str());
+//         }
+
+//         vTaskDelay(179157 / portTICK_PERIOD_MS); // Espera por 3 minutos
+//     }
+// }
 
 
 

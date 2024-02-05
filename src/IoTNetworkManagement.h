@@ -4,7 +4,8 @@
 
 // #include "Arduino.h"
 #include <WiFi.h>
-#include <PubSubClient.h>
+// #include <PubSubClient.h>
+#include <ArduinoMqttClient.h>
 #include <Preferences.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
@@ -60,13 +61,13 @@ public:
     uint16_t _mqtt_port;
     const char* _mqtt_user;
     const char* _mqtt_password;
-    PubSubClient _mqttClient;
+    MqttClient _mqttClient;
     EnergyMonitor emon1;  
     SemaphoreHandle_t mqttMutex;
     // IoTNetworkManagement(const IoTNetworkManagement&) = delete; // No copy constructor
     void setupTemperatureSensor(uint8_t pin);
     // MQTT callback to handle incoming messages
-    static void mqttCallback(char* topic, byte* payload, unsigned int length);
+    static void mqttCallback(int messageSize);
     void begin();
     // void handle();
     void checkIRSender();
@@ -83,7 +84,7 @@ public:
         _mqtt_port = mqtt_port;
         _mqtt_user = mqtt_user;
         _mqtt_password = mqtt_password;
-        _mqttClient = PubSubClient(mqtt_broker, mqtt_port, mqttCallback, _wifiClient);
+        _mqttClient = MqttClient(_wifiClient);
         mqttMutex = xSemaphoreCreateMutex();
         emon1.current(25, 0.50); 
     }
@@ -113,17 +114,17 @@ private:
     TaskHandle_t _checkIRTaskHandle;
     TaskHandle_t _deviceStatusTaskHandle;
     // TaskHandle_t _networkLoadTaskHandle;
-    TaskHandle_t _wifiSignalStrengthTaskHandle;
-    TaskHandle_t _errorReportTaskHandle;
+    // TaskHandle_t _wifiSignalStrengthTaskHandle;
+    // TaskHandle_t _errorReportTaskHandle;
     // Private methods
-    static void lightSensorTask(void *parameter);
-    static void soundSensorTask(void *parameter);
-    static void temperatureSensorTask(void *parameter);
+    // static void lightSensorTask(void *parameter);
+    // static void soundSensorTask(void *parameter);
+    // static void temperatureSensorTask(void *parameter);
     static void deviceStatusTask(void* parameter);
     static void checkIRSenderTask(void* parameter);
-    static void wifiSignalStrengthTask(void* parameter);
+    // static void wifiSignalStrengthTask(void* parameter);
     // static void networkLoadTask(void* parameter);
-    static void errorReportTask(void* parameter);
+    // static void errorReportTask(void* parameter);
     static void mqttLoopTask(void* parameter);
     void handleError(const String& error);
     void updateBootCount();
