@@ -26,8 +26,9 @@ const std::map<IoTNetworkManagement::SensorType, String> IoTNetworkManagement::s
 void IoTNetworkManagement::begin() {
     // Setup code here: WiFi connection, MQTT connection, etc.
     Serial.println("Connecting to broker...");
-    _mqttClient.setServer(_mqtt_broker, _mqtt_port);
-    _mqttClient.setCallback(mqttCallback);
+    _mqttClient = MqttClient(_wifiClient);
+    _mqttClient.connect(_mqtt_broker, _mqtt_port);
+    _mqttClient.onMessage(mqttCallback);
     _mqttClient.subscribe("connected_devices");
     _mqttClient.subscribe("esp32/+/commands");
 
@@ -35,7 +36,7 @@ void IoTNetworkManagement::begin() {
         Serial.println("Creating mutex");
         mqttMutex = xSemaphoreCreateMutex();
     }
-    _mqttClient.loop();
+    _mqttClient.poll();
     // Start the IR check task
     if (isIRSetupCalled) {
         Serial.println("IR setup called");
@@ -70,6 +71,7 @@ void IoTNetworkManagement::begin() {
         &_wifiSignalStrengthTaskHandle,
         1
     );
+    
     xTaskCreatePinnedToCore(
         errorReportTask,              
         "ErrorReportTask",            
@@ -79,6 +81,7 @@ void IoTNetworkManagement::begin() {
         &_errorReportTaskHandle,
         1    
     );
+
     xTaskCreatePinnedToCore(
         this->mqttLoopTask, 
         "mqttLoopTask",     
@@ -99,46 +102,22 @@ void IoTNetworkManagement::begin() {
     }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 }
 
-void IoTNetworkManagement::mqttCallback(char* topic, byte* payload, unsigned int length) {
+void IoTNetworkManagement::mqttCallback(int messageSize) {
         // Convert payload to a String for easy comparison
         IoTNetworkManagement& instance = IoTNetworkManagement::getInstance();
-        // Serial.println("Message received");
+        Serial.println("Message received");
+
         String message;
-        for (unsigned int i = 0; i < length; i++) {
-            message += (char)payload[i];
+
+        while (instance._mqttClient.available()) {
+            message += (char) instance._mqttClient.read();
         }
 
         // Check if the message is "GET" and if it's on the "connected_devices" topic
-        if (String(topic) == "connected_devices" && message == "GET") {
+        if (String(instance._mqttClient.messageTopic()) == "connected_devices" && message == "GET") {
             // Respond with "CONNECTED" message
             Serial.println("Connected devices");
             instance.publishData("connected_devices", "CONNECTED");
-            // if (instance.mqttMutex == NULL) {
-            //     Serial.println("Failed to create semaphore");
-            //     // Handle the error...  
-            //     instance.mqttMutex = xSemaphoreCreateMutex();
-            // }
-            // if (xSemaphoreTake(instance.mqttMutex, portMAX_DELAY) == pdTRUE) {
-            //     if(instance._mqttClient.connected()){
-            //         const char* connectMessage = "CONNECTED";
-            //         if(instance._mqttClient.publish(topic, "CONNECTED")){
-            //             Serial.println("Published");
-            //         } else {
-            //             instance.handleError("Failed to publish Connected Devices");
-            //             Serial.print("connected_devices failed");
-            //         }
-            //     } else {
-            //         Serial.println("MQTT not connected");
-            //         instance.handleError("MQTT not connected");
-            //         instance.reconnectMqtt();
-            //     }
-
-            //     // Don't forget to give the mutex back when you're done
-            //     xSemaphoreGive(instance.mqttMutex);
-            // } else {
-            //     // Handle the error case where the mutex couldn't be taken
-            //     Serial.println("Error: couldn't take MQTT mutex");  
-            // }
         } 
 
 }
@@ -146,104 +125,77 @@ void IoTNetworkManagement::mqttCallback(char* topic, byte* payload, unsigned int
 
 void IoTNetworkManagement::reconnectMqtt() {
     // Attempt to reconnect to the MQTT broker
-    // if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
+    IoTNetworkManagement& instance = IoTNetworkManagement::getInstance();
+    if (instance.mqttMutex == NULL) {
+        Serial.println("Failed to create semaphore");
+        // Handle the error...  
+        instance.mqttMutex = xSemaphoreCreateMutex();
+    }
+    if (xSemaphoreTake(instance.mqttMutex, portMAX_DELAY) == pdTRUE) {
+        Serial.println("Trying Connection...");
+        instance._mqttClient.connect(_mqtt_broker, _mqtt_port);
+        instance._mqttClient.onMessage(mqttCallback);
 
-        while (!_mqttClient.connected()) {
-            Serial.println("Attempting MQTT connection...");
-            // Attempt to connect (modify as needed with your MQTT credentials)
-            if (_mqttClient.connect(_device_id, _mqtt_user, _mqtt_password)) {
-                Serial.println("MQTT connected");
-                // Resubscribe to topics if necessary
-                _mqttClient.subscribe("connected_devices");
-                String topic = String("esp32/") + _device_id + "/+";
-                _mqttClient.subscribe(topic.c_str());
-                _mqttClient.setCallback(IoTNetworkManagement::mqttCallback);
+        Serial.println("MQTT connected");
+        // Resubscribe to topics if necessary
+        instance._mqttClient.subscribe("connected_devices");
+        String topic = String("esp32/") + _device_id + "/+";
+        instance._mqttClient.subscribe(topic.c_str());
+        instance._mqttClient.poll();
 
-            } else {
-                Serial.print("MQTT connection failed, rc=");
-                int state = _mqttClient.state();
-                Serial.print(state);
-                if (state != MQTT_CONNECTED) {
-                    // Convert state to a human-readable error message
-                    String errorMessage;
-                    switch (state) {
-                        case MQTT_CONNECTION_TIMEOUT:
-                            errorMessage = "MQTT_CONNECTION_TIMEOUT";
-                            break;
-                        case MQTT_CONNECTION_LOST:
-                            errorMessage = "MQTT_CONNECTION_LOST";
-                            break;
-                        case MQTT_CONNECT_FAILED:
-                            errorMessage = "MQTT_CONNECT_FAILED";
-                            break;
-                        case MQTT_DISCONNECTED:
-                            errorMessage = "MQTT_DISCONNECTED";
-                            break;
-                        case MQTT_CONNECT_BAD_PROTOCOL:
-                            errorMessage = "MQTT_CONNECT_BAD_PROTOCOL";
-                            break;
-                        case MQTT_CONNECT_BAD_CLIENT_ID:
-                            errorMessage = "MQTT_CONNECT_BAD_CLIENT_ID";
-                            break;
-                        case MQTT_CONNECT_UNAVAILABLE:
-                            errorMessage = "MQTT_CONNECT_UNAVAILABLE";
-                            break;
-                        case MQTT_CONNECT_BAD_CREDENTIALS:
-                            errorMessage = "MQTT_CONNECT_BAD_CREDENTIALS";
-                            break;
-                        case MQTT_CONNECT_UNAUTHORIZED:
-                            errorMessage = "MQTT_CONNECT_UNAUTHORIZED";
-                            break;
-                        default:
-                            errorMessage = "UNKNOWN_ERROR";
-                    }
-                    // Log the error message to NVS
-                    handleError(errorMessage);
-                }
-            }
-        }
+        xSemaphoreGive(instance.mqttMutex);
+    } else {
+        // Handle the error case where the mutex couldn't be taken
+        Serial.println("Error: couldn't take MQTT mutex");  
+    }
+    
 
 }
 
 void IoTNetworkManagement::publishData(const char* type_of_data, const char* payload) {
     // Construct the MQTT topic
-    if (mqttMutex == NULL) {
-        Serial.println("Failed to create semaphore");
-        // Handle the error...  
-        mqttMutex = xSemaphoreCreateMutex();
-    }
-    if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
+    // if (mqttMutex == NULL) {
+    //     Serial.println("Failed to create semaphore");
+    //     // Handle the error...  
+    //     mqttMutex = xSemaphoreCreateMutex();
+    // }
+    // if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
 
         Serial.println("Publishing data...");
         Serial.println(type_of_data);
         Serial.println(payload);
         String topic;
+
         if(type_of_data == "connected_devices"){
             topic = String("connected_devices");
         } else {
             topic = String("esp32/") + _device_id + "/" + type_of_data;
         }
-        Serial.println(topic);
-        if(_mqttClient.connected()){
-            if(_mqttClient.publish(topic.c_str(), payload)){
-                Serial.println("Published");
-            } else {
-                handleError("Failed to publish " + String(type_of_data));
-                Serial.print("Failed to publish ");
-                Serial.print(type_of_data);
+
+        if(!_mqttClient.connected()){
+            if (!_mqttClient.connect(_mqtt_broker, _mqtt_port)) {
+                Serial.print("MQTT connection failed! Error code = ");
+                Serial.println();
+                handleError("MQTT not connected");
+                reconnectMqtt();
             }
-        } else {
-            Serial.println("MQTT not connected");
-            handleError("MQTT not connected");
-            reconnectMqtt();
         }
 
+        Serial.println("Connected to MQTT broker");
+
+        Serial.println("Trying to publish");
+        _mqttClient.beginMessage(topic);
+        _mqttClient.print(payload);
+        _mqttClient.endMessage();
+        Serial.println("Published");
+
+
         // Don't forget to give the mutex back when you're done
-        xSemaphoreGive(mqttMutex);
-    } else {
-        // Handle the error case where the mutex couldn't be taken
-        Serial.println("Error: couldn't take MQTT mutex");  
-    }
+    //     xSemaphoreGive(mqttMutex);
+    // } else {
+    //     // Handle the error case where the mutex couldn't be taken
+    //     Serial.println("Error: couldn't take MQTT mutex");  
+    // }
 
 }
 
@@ -312,7 +264,7 @@ void IoTNetworkManagement::deviceStatusTask(void *parameter) {
     for (;;) { // Task loop
         // Get device status and uptime
         String deviceStatus = WiFi.status() == WL_CONNECTED ? "Online" : "Offline";
-        unsigned long uptime = millis() / 60000; // Uptime in minutes
+        unsigned long uptime = (int) millis() / 60000;
     // Inside the task loop, right after publishing Device Uptime
         unsigned long bootCount = instance->getBootCount();
         String lastBootTime = instance->getLastBootTime();
@@ -537,7 +489,7 @@ void IoTNetworkManagement::lightSensorTask(void *parameter) {
         // Read the light level
         float lightLevel = analogRead(manager->_LIGHT_PIN);
         String topic = "light";
-        // Check if any reads failed and exit early (to try again).
+        // Check if any reads failed and exit early.
         if (isnan(lightLevel) || lightLevel < 15) {
             Serial.println(F("Failed to read from light sensor!"));
             manager->handleError("Failed to read from light sensor!");
@@ -548,7 +500,7 @@ void IoTNetworkManagement::lightSensorTask(void *parameter) {
         }
 
         // Delay between reads
-        vTaskDelay(147100 / portTICK_PERIOD_MS); // Adjust as necessary
+        vTaskDelay(147100 / portTICK_PERIOD_MS);
     }
 }
 
@@ -559,8 +511,8 @@ void IoTNetworkManagement::mqttLoopTask(void *parameter) {
     }
     IoTNetworkManagement *instance = static_cast<IoTNetworkManagement *>(parameter);
     for (;;) {
-        instance->_mqttClient.loop();
-        vTaskDelay(pdMS_TO_TICKS(30)); // Delay curto para evitar uso excessivo da CPU
+        instance->_mqttClient.poll();
+        vTaskDelay(pdMS_TO_TICKS(20)); // Delay curto para evitar uso excessivo da CPU
     }
 }
 
